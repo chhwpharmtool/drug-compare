@@ -146,6 +146,24 @@ table.bt{border-collapse:collapse;width:100%;font-size:.9rem;min-width:760px}
 .bt .yes{color:var(--c-a);font-weight:700}
 .bt .no{color:var(--muted)}
 .bt tr.miss td{color:var(--warn)}
+.bgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media (max-width:680px){.bgrid{grid-template-columns:1fr}}
+.blab{display:block;font-weight:500;font-size:.92rem;margin-bottom:4px}
+.codes{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;margin-top:4px}
+.cd{font-size:.72rem;font-weight:500;border:1px solid var(--line);border-radius:4px;padding:0 4px;color:var(--muted);white-space:nowrap}
+.cd.hit{background:var(--k);border-color:var(--k);color:var(--card)}
+.more{font-size:.72rem;color:var(--muted)}
+.st{display:inline-block;font-weight:700;font-size:.85rem;border-radius:5px;padding:1px 8px;white-space:nowrap}
+.st.ok{background:var(--c-a-bg);color:var(--c-a);border:1.5px solid var(--c-a)}
+.st.part{background:var(--c-c-bg);color:var(--c-c);border:1.5px solid var(--c-c)}
+.st.no{background:var(--card);color:var(--warn);border:1.5px solid var(--warn)}
+.mt{font-size:.82rem;margin-top:4px;min-width:170px}
+.mt b{font-weight:700}
+.extra{margin-top:16px;font-size:.9rem}
+.extra h3{font-size:1rem;margin:0 0 6px}
+.extra ul{margin:0;padding-left:1.2em}
+.extra li{margin:2px 0}
+.extra .sub{color:var(--muted);font-size:.82rem}
 footer{margin-top:48px;color:var(--muted);font-size:.85rem;border-top:1px solid var(--line);padding-top:14px}
 footer p{margin:4px 0;max-width:72ch}
 @media (max-width:680px){
@@ -178,8 +196,17 @@ footer p{margin:4px 0;max-width:72ch}
 
   <section class="batch" aria-labelledby="batchTitle">
     <h2 id="batchTitle">批次比對</h2>
-    <p>一行貼一個藥品（英文品名、中文品名、健保碼或批價碼都可以），直接產生總覽表。點表格中的任一列可以看該藥的完整比對結果。</p>
-    <textarea id="batchIn" spellcheck="false" placeholder="例如：&#10;Newtase Tablets “Chinteng”&#10;Flutafin Capsule 200mg (Acetylcysteine)&#10;Fucou Capsules “H.S.”"></textarea>
+    <p>在左邊貼上雲端用藥（一行一個，英文品名、健保碼皆可）。若要核對住院醫囑，再於右邊貼上住院用藥的院內代碼，工具會標出每個雲端藥物在住院用藥中對應到哪一個院內品項；對應不到的會標示「需開自備藥或替代藥」。</p>
+    <div class="bgrid">
+      <div>
+        <label class="blab" for="batchIn">① 自備藥清單</label>
+        <textarea id="batchIn" spellcheck="false" placeholder="例如：&#10;AC48082197&#10;AC270111G0&#10;A043488100&#10;AC56712100&#10;AC58589100&#10;BC23898100&#10;BC27514100"></textarea>
+      </div>
+      <div>
+        <label class="blab" for="inptIn">② 住院用藥清單（請填院內代碼）</label>
+        <textarea id="inptIn" spellcheck="false" placeholder="請貼上住院 UD 醫囑的院內代碼（可整段貼上），例如：&#10;NOOO12&#10;CALO34&#10;FLUO32&#10;SENO00&#10;SERO18&#10;OMEO00"></textarea>
+      </div>
+    </div>
     <div class="acts">
       <button class="btn primary" id="batchRun" type="button">產生總覽表</button>
       <button class="btn" id="batchCopy" type="button" hidden>複製總覽表（可貼到 Excel）</button>
@@ -456,6 +483,9 @@ function renderResult(){
 const compact = s => String(s ?? "").toUpperCase().replace(/[^A-Z0-9\u3400-\u9fff]+/g, "");
 const nhiCompact = NHI.map(d => [compact(d[1]), compact(d[2])]);
 const BATCH_MAX = 50;
+/* 每個院內品項對應的分類：本品優先，其次完全相同、規格不同、劑型不同、部分成分、僅成分名 */
+const MATCH_ORDER = ["self","a","b","c","d","e"];
+const MATCH_LABEL = {self:"本品", a:"成分含量劑型相同", b:"成分相同規格不同", c:"成分相同劑型不同", d:"部分成分相同", e:"僅成分名相同"};
 function resolveLine(line){
   let raw = line.replace(/""/g, '"').trim().replace(/^"([\s\S]*)"$/, "$1").trim();
   const c = compact(raw);
@@ -486,11 +516,32 @@ function resolveLine(line){
   const names = new Set(list.map(d => d[1])).size;
   return {...base, nhi: chosen, how: names > 1 ? (how === "approx" ? "approx" : "multi") : how, alt: list.length - 1};
 }
-let batchRows = [];
+/* 解析住院用藥清單：從貼上的文字中找出手冊裡的批價碼（也接受健保碼） */
+function parseInpatient(text){
+  const byP = new Map(), byC = new Map();
+  for (const h of HB) {
+    if (h.p) { const k = h.p.toUpperCase(); if (!byP.has(k)) byP.set(k, h); }
+    if (h.c) { const k = h.c.toUpperCase(); if (!byC.has(k)) byC.set(k, h); }
+  }
+  const found = new Map(), unknown = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let hit = false;
+    for (const t of line.toUpperCase().split(/[^A-Z0-9]+/)) {
+      const h = byP.get(t) || byC.get(t);
+      if (h) { hit = true; if (!found.has(h.p.toUpperCase())) found.set(h.p.toUpperCase(), h); }
+    }
+    if (!hit) unknown.push(line.trim());
+  }
+  return {found, unknown};
+}
+let batchRows = [], inpt = null;
 function runBatch(){
   const lines = document.getElementById("batchIn").value.split(/\r?\n/).filter(l => l.trim());
+  const itext = document.getElementById("inptIn").value;
   const msg = document.getElementById("batchMsg");
-  if (!lines.length) { msg.textContent = "請先貼上藥品名稱，一行一個。"; return; }
+  if (!lines.length) { msg.textContent = "請先在①貼上自備藥，一行一個。"; return; }
+  inpt = itext.trim() ? parseInpatient(itext) : null;
   const used = lines.slice(0, BATCH_MAX);
   const saved = current;
   batchRows = used.map(l => {
@@ -501,19 +552,56 @@ function runBatch(){
       const qi = r.nhi ? nhiIngs(r.nhi) : r.hb.textIngs;
       r.res = qi.length ? classify() : null;
       r.inHb = r.nhi ? HB.filter(h => h.c === r.nhi[0]) : [r.hb];
-    }
+      /* 院內代碼與分類綁定 */
+      r.links = [];
+      const seen = new Set();
+      const add = (cat, h) => { const k = (h.p || "#" + h.idx).toUpperCase(); if (!seen.has(k)) { seen.add(k); r.links.push({cat, h, key: k}); } };
+      r.inHb.forEach(h => add("self", h));
+      if (r.res) for (const c of ["a","b","c","d","e"]) r.res[c].forEach(it => add(c, it.h));
+      if (inpt) {
+        r.matched = r.links.filter(l => inpt.found.has(l.key));
+        const best = r.matched.length ? r.matched[0].cat : null;
+        r.status = !best ? "no" : (["self","a","b","c"].includes(best) ? "ok" : "part");
+      }
+    } else if (inpt) { r.status = "no"; r.matched = []; r.links = []; }
     return r;
   }).filter(Boolean);
   current = saved;
-  msg.textContent = lines.length > BATCH_MAX ? `一次最多 ${BATCH_MAX} 個，只比對了前 ${BATCH_MAX} 個。` : `已比對 ${batchRows.length} 個藥品。`;
+  let m = lines.length > BATCH_MAX ? `一次最多 ${BATCH_MAX} 個，只比對了前 ${BATCH_MAX} 個。` : `已比對 ${batchRows.length} 個自備藥。`;
+  if (inpt) m += `住院用藥辨識出 ${inpt.found.size} 個院內代碼` + (inpt.unknown.length ? `，${inpt.unknown.length} 個代碼無法辨識（列在表格下方，請人工檢核）。` : "。");
+  msg.textContent = m;
   renderBatch();
+}
+function codeList(r, cat){
+  const items = r.links.filter(l => l.cat === cat);
+  if (!items.length) return "";
+  const hit = inpt ? items.filter(l => inpt.found.has(l.key)) : [];
+  const rest = items.filter(l => !hit.includes(l));
+  const LIMIT = 6;
+  const shown = [...hit, ...rest.slice(0, Math.max(0, LIMIT - hit.length))];
+  const more = items.length - shown.length;
+  return `<div class="codes">${shown.map(l => `<span class="cd${hit.includes(l) ? " hit" : ""}" title="${esc(l.h.n)}">${esc(l.h.p || "無批價碼")}</span>`).join("")}${more > 0 ? `<span class="more">等 ${more} 項</span>` : ""}</div>`;
+}
+function statusCell(r){
+  if (!inpt) return "";
+  if (r.how === "none") return `<td><span class="st no">✖ 需開自備藥或替代藥</span></td>`;
+  if (r.status === "no") return `<td><span class="st no">✖ 需開自備藥或替代藥</span><div class="mt sub">住院用藥中沒有對應品項</div></td>`;
+  /* 自備藥本身就在手冊中、且住院已開立同一代碼：只顯示已開立 */
+  const selfM = r.matched.filter(l => l.cat === "self");
+  if (selfM.length) return `<td><span class="st ok">✔ 已開立</span>${selfM.map(l => `<div class="mt"><b>${esc(l.h.p)}</b></div>`).join("")}</td>`;
+  const lab = r.status === "ok" ? `<span class="st ok">✔ 已對應</span>` : `<span class="st part">⚠ 僅部分對應</span>`;
+  const list = r.matched.map(l => `<div class="mt"><b>${esc(l.h.p)}</b> ${esc(l.h.n)}<div class="sub">${MATCH_LABEL[l.cat]}</div></div>`).join("");
+  const tip = r.status === "part" ? `<div class="mt sub">請評估是否需開自備藥或替代藥</div>` : "";
+  return `<td>${lab}${list}${tip}</td>`;
 }
 function renderBatch(){
   const out = document.getElementById("batchOut");
   document.getElementById("batchCopy").hidden = !batchRows.length;
   const heads = CATS.map(c => `<th class="n" style="--k:var(${c.k})">${c.t}</th>`).join("");
+  const stHead = inpt ? `<th>住院用藥對應</th>` : "";
+  const ncol = CATS.length + 3 + (inpt ? 1 : 0);
   const body = batchRows.map((r,i) => {
-    if (r.how === "none") return `<tr class="miss"><td>${i+1}</td><td colspan="${CATS.length+2}">找不到「${esc(r.input)}」，請檢查拼字或改用健保碼。</td></tr>`;
+    if (r.how === "none") return `<tr class="miss"><td>${i+1}</td><td colspan="2">找不到「${esc(r.input)}」，請檢查拼字或改用健保碼。</td>${statusCell(r)}<td colspan="${CATS.length}"></td></tr>`;
     const d = r.nhi;
     const name = d ? `<div class="nm">${esc(d[1])}</div><div class="sub">${esc(d[0])}　${esc(d[3])}</div>`
                    : `<div class="nm">${esc(r.hb.n)}</div><div class="sub">手冊品項，無健保資料</div>`;
@@ -521,15 +609,24 @@ function renderBatch(){
     if (r.how === "approx") flag = `<span class="flag">近似比對，請確認是否為此藥</span>`;
     else if (r.how === "multi") flag = `<span class="flag">符合多個藥品，已選第一個</span>`;
     else if (r.alt > 0) flag = `<div class="sub">另有 ${r.alt} 個同名健保碼</div>`;
-    const hb = r.inHb.length ? `<span class="yes">✔ ${esc(r.inHb[0].p || "")}</span>` : `<span class="no">✖</span>`;
+    const selfHit = inpt && r.inHb.some(h => inpt.found.has((h.p || "").toUpperCase()));
+    const hb = r.inHb.length ? `<div class="codes" style="--k:var(--c-a);justify-content:flex-start">${r.inHb.map(h => `<span class="cd${selfHit ? " hit" : ""}">${esc(h.p || "無批價碼")}</span>`).join("")}</div>` : `<span class="no">✖</span>`;
     const nums = CATS.map(c => {
       const n = r.res ? r.res[c.id].length : 0;
-      return `<td class="n${n ? "" : " z"}" style="--k:var(${c.k})">${r.res ? n : "—"}</td>`;
+      return `<td class="n${n ? "" : " z"}" style="--k:var(${c.k})">${r.res ? n : "—"}${r.res ? codeList(r, c.id) : ""}</td>`;
     }).join("");
-    return `<tr data-i="${i}" tabindex="0"><td>${i+1}</td><td><div class="in">${esc(r.input)}</div>${name}${flag}</td><td>${hb}</td>${nums}</tr>`;
+    return `<tr data-i="${i}" tabindex="0"><td>${i+1}</td><td><div class="in">${esc(r.input)}</div>${name}${flag}</td><td>${hb}</td>${statusCell(r)}${nums}</tr>`;
   }).join("");
+  let extra = "";
+  if (inpt) {
+    const used = new Set();
+    batchRows.forEach(r => (r.matched || []).forEach(l => used.add(l.key)));
+    const others = [...inpt.found.values()].filter(h => !used.has(h.p.toUpperCase()));
+    if (others.length) extra += `<div class="extra"><h3>住院用藥中未對應任何自備藥的品項（${others.length}）</h3><ul>${others.map(h => `<li><b>${esc(h.p)}</b> ${esc(h.n)}</li>`).join("")}</ul></div>`;
+    if (inpt.unknown.length) extra += `<div class="extra"><h3>住院用藥清單中無法辨識的代碼，請人工檢核（${inpt.unknown.length}）</h3><div class="sub">這些代碼不在藥品手冊中，請確認是否輸入正確。</div><ul>${inpt.unknown.map(u => `<li>${esc(u)}</li>`).join("")}</ul></div>`;
+  }
   out.innerHTML = batchRows.length ? `<div class="btwrap"><table class="bt">
-    <thead><tr><th>#</th><th>輸入／對應藥品</th><th>在手冊中</th>${heads}</tr></thead><tbody>${body}</tbody></table></div>` : "";
+    <thead><tr><th>#</th><th>輸入／對應藥品</th><th>在手冊中</th>${stHead}${heads}</tr></thead><tbody>${body}</tbody></table></div>${extra}` : "";
 }
 function openBatchRow(tr){
   const r = batchRows[+tr.dataset.i]; if (!r) return;
@@ -545,11 +642,20 @@ document.getElementById("batchOut").addEventListener("keydown", e => {
   if (e.key === "Enter" || e.key === " ") { const tr = e.target.closest("tr[data-i]"); if (tr) { e.preventDefault(); openBatchRow(tr); } }
 });
 document.getElementById("batchCopy").addEventListener("click", async () => {
-  const head = ["輸入","對應藥品","健保碼","劑型","在手冊中(批價碼)", ...CATS.map(c => c.t)].join("\t");
-  const lines = batchRows.map(r => r.how === "none"
-    ? [r.input, "找不到", "", "", "", ...CATS.map(() => "")].join("\t")
-    : [r.input, r.nhi ? r.nhi[1] : r.hb.n, r.nhi ? r.nhi[0] : "", r.nhi ? r.nhi[3] : "",
-       r.inHb.length ? r.inHb[0].p : "否", ...CATS.map(c => r.res ? r.res[c.id].length : "")].join("\t"));
+  const codesOf = (r, cat) => (r.links || []).filter(l => l.cat === cat).map(l => l.h.p || "無批價碼").join(", ");
+  const head = ["輸入","對應藥品","健保碼","劑型","在手冊中(批價碼)",
+    ...(inpt ? ["住院用藥對應","對應院內代碼","對應分類"] : []),
+    ...CATS.flatMap(c => [c.t + "(數量)", c.t + "(批價碼)"])].join("\t");
+  const lines = batchRows.map(r => {
+    const selfM = (r.matched || []).filter(l => l.cat === "self");
+    const st = !inpt ? [] : (r.how === "none" || r.status === "no" ? ["需開自備藥或替代藥","",""]
+      : selfM.length ? ["已開立", selfM.map(l => l.h.p).join(", "), ""]
+      : [r.status === "ok" ? "已對應" : "僅部分對應(請評估)", r.matched.map(l => l.h.p).join(", "), r.matched.map(l => MATCH_LABEL[l.cat]).join(", ")]);
+    if (r.how === "none") return [r.input, "找不到", "", "", "", ...st, ...CATS.flatMap(() => ["",""])].join("\t");
+    return [r.input, r.nhi ? r.nhi[1] : r.hb.n, r.nhi ? r.nhi[0] : "", r.nhi ? r.nhi[3] : "",
+      r.inHb.length ? r.inHb.map(h => h.p).join(", ") : "否", ...st,
+      ...CATS.flatMap(c => [r.res ? r.res[c.id].length : "", codesOf(r, c.id)])].join("\t");
+  });
   const txt = [head, ...lines].join("\n");
   const msg = document.getElementById("batchMsg");
   try { await navigator.clipboard.writeText(txt); msg.textContent = "已複製，可以直接貼到 Excel。"; }
